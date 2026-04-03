@@ -19,6 +19,7 @@ function ChatApp() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [debugEvents, setDebugEvents] = useState<DebugEvent[]>([])
+  const [sessionId, setSessionId] = useState<string | null>(null)
   const debugIdRef = useRef(0)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -26,6 +27,15 @@ function ChatApp() {
   const isNearBottomRef = useRef(true)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const autoTriggered = useRef(false)
+
+  async function createSession(): Promise<string> {
+    const res = await fetch('/api/session', { method: 'POST' })
+    const data = await res.json()
+    setSessionId(data.session_id)
+    return data.session_id
+  }
+
+  useEffect(() => { createSession() }, [])
 
   const scheduleScroll = useCallback(() => {
     if (!isNearBottomRef.current) return
@@ -82,12 +92,11 @@ function ChatApp() {
     setMessages([...history, { role: 'assistant', content: '', streaming: true }])
 
     try {
+      const sid = sessionId ?? await createSession()
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: history.map(m => ({ role: m.role, content: m.content })),
-        }),
+        body: JSON.stringify({ session_id: sid, message: text }),
       })
 
       const reader = res.body!.getReader()
@@ -177,7 +186,12 @@ function ChatApp() {
       <div className="flex flex-col flex-1 min-w-0 px-4">
         <header
           className="flex items-center gap-3 py-5 border-b border-white/8 cursor-pointer"
-          onClick={() => { setMessages([]); setInput(''); setDebugEvents([]); window.history.replaceState({}, '', '/') }}
+          onClick={() => {
+            if (sessionId) fetch(`/api/session/${sessionId}`, { method: 'DELETE' })
+            setMessages([]); setInput(''); setDebugEvents([])
+            window.history.replaceState({}, '', '/')
+            createSession()
+          }}
         >
           <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center">
             <ShoppingBag size={18} className="text-white" />

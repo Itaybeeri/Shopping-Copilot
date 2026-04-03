@@ -74,20 +74,24 @@ Open http://localhost:8000 in your browser.
 ### Request flow
 
 ```
-1. User types a message
-2. Browser POSTs to /api/chat with conversation history
-3. FastAPI calls OpenAI (gpt-5.4-mini) with tool definitions
-4. OpenAI decides which tool to call based on user intent
-5. Backend executes the tool (checks cache → calls DummyJSON if needed)
-6. Tool result is added to conversation and OpenAI is called again
-7. OpenAI generates a text response
-8. Backend streams SSE events to the browser:
-   - tool_call  → debug panel shows which tool was called + args
-   - tool_result → debug panel shows result count + API URL + JSON payload
-   - products   → chat renders product cards
-   - categories → chat renders clickable category chips
-   - text       → chat streams the AI text response
-9. Stream ends with [DONE]
+1. Browser calls POST /api/session on load → receives a session_id
+2. User types a message
+3. Browser POSTs to /api/chat with session_id + message only (no history)
+4. FastAPI looks up the conversation history from the server-side session store
+5. Appends the user message and calls OpenAI (gpt-5.4-mini) with tool definitions
+6. OpenAI decides which tool to call based on user intent
+7. Backend executes the tool (checks cache → calls DummyJSON if needed)
+8. Tool result is added to conversation and OpenAI is called again
+9. OpenAI generates a text response
+10. Backend streams SSE events to the browser:
+    - tool_call  → debug panel shows which tool was called + args
+    - tool_result → debug panel shows result count + API URL + JSON payload
+    - products   → chat renders product cards
+    - categories → chat renders clickable category chips
+    - text       → chat streams the AI text response
+11. Assistant reply is saved back to the session store
+12. Stream ends with [DONE]
+13. On chat reset → browser calls DELETE /api/session/{id} and creates a new session
 ```
 
 ---
@@ -126,7 +130,10 @@ Open http://localhost:8000 in your browser.
 The FastAPI application. Responsibilities:
 
 - Serves the pre-built React frontend as static files (single port, single process)
-- Exposes `POST /api/chat` which returns a `StreamingResponse` (SSE)
+- Exposes `POST /api/session` to create a new session (returns a UUID session_id)
+- Exposes `DELETE /api/session/{id}` to clear a session on chat reset
+- Exposes `POST /api/chat` which accepts `session_id` + `message` and returns a `StreamingResponse` (SSE)
+- Maintains server-side conversation history in `_sessions` dict — the browser never sends history
 - Runs the **agentic loop**: calls OpenAI → executes tool calls → loops until no more tool calls → streams final response
 - Streams 5 SSE event types: `tool_call`, `tool_result`, `products`, `categories`, `text`
 - The system prompt contains explicit tool selection rules to guide the model
@@ -168,11 +175,13 @@ Top-level router. If `?id=` is in the URL it renders `ProductDetail`, otherwise 
 
 `ChatApp` manages:
 
-- Full conversation state (`messages`)
+- Conversation display state (`messages`) — UI only, history lives on the server
+- Session lifecycle: creates a session on mount via `POST /api/session`, deletes it on reset
+- Sends only `{ session_id, message }` per request — no history in the payload
 - SSE stream parsing — routes each event type to the correct state update
 - Debug events state passed to `DebugPanel`
 - Auto-trigger on `?category=` or `?search=` URL params (used when navigating back from product detail)
-- Header click resets the entire chat
+- Header click resets the entire chat, deletes the old session and creates a new one
 
 ### `Message.tsx`
 
@@ -222,7 +231,14 @@ Collapsible right-side panel showing the full tool call trace for every message.
 
 ## Technical Choices & Tradeoffs
 
-**Single process, single port** — FastAPI serves both the API and the pre-built React frontend. No reverse proxy needed, one command to run.
+**Server-side session store** — Conversation history is stored in a Python in-memory dict on the backend, keyed by a UUID session_id. The browser only sends `session_id + message` per request, not the full history. This reduces payload size and keeps conversation state off the client.
+
+In production this would be replaced with a **centralized session store** such as:
+- **Redis** — fast, TTL-based expiry, works across multiple server instances
+- **DynamoDB / Firestore** — persistent sessions that survive server restarts
+- **PostgreSQL** — if you need full conversation history for analytics or replay
+
+The current in-memory dict is cleared on server restart and is not safe for multi-process deployments (e.g. multiple uvicorn workers would each have their own isolated dict).
 
 **OpenAI function calling for intent detection** — The model decides which tool to call based on the user's message. No manual NLP, keyword parsing, or regex needed. Tool selection rules in the system prompt guide edge cases (e.g. always prefer `get_products_by_category` over `search_products` when a category name is mentioned).
 
@@ -233,7 +249,5 @@ Collapsible right-side panel showing the full tool call trace for every message.
 **Local tag/field filtering** — Same approach: fetch all products, filter in Python. Acceptable for this dataset size.
 
 **ReactMarkdown only after streaming** — During streaming, text is rendered as a plain `<span>` to avoid expensive re-parsing on every token. ReactMarkdown is applied once when the stream is complete, eliminating flicker.
-
-**No conversation memory** — The full conversation history is sent with every request (stateless backend). Suitable for a local demo; would need a session store for production.
 
 **Results capped at 8** — Keeps the UI clean and avoids overwhelming the user. The `get_more_products` tool allows pagination on demand.

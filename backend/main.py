@@ -1,12 +1,13 @@
 import json
 import os
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -24,6 +25,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Server-side session store: session_id -> conversation history
+_sessions: dict[str, list[dict]] = {}
+
 SYSTEM_PROMPT = """You are a friendly and enthusiastic shopping copilot. Help users discover products they'll love.
 Always use the available tools to fetch real product data before responding.
 Product results are already displayed as visual cards to the user — do NOT list or repeat product names, prices or details in your text response.
@@ -40,13 +44,22 @@ Tool selection rules:
 Never make up product data — always use tool results."""
 
 
-class Message(BaseModel):
-    role: str
-    content: str
-
-
 class ChatRequest(BaseModel):
-    messages: list[Message]
+    session_id: str
+    message: str
+
+
+@app.post("/api/session")
+async def create_session():
+    session_id = str(uuid.uuid4())
+    _sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    return JSONResponse({"session_id": session_id})
+
+
+@app.delete("/api/session/{session_id}")
+async def delete_session(session_id: str):
+    _sessions.pop(session_id, None)
+    return JSONResponse({"ok": True})
 
 
 async def run_tool(name: str, arguments: str) -> str:
@@ -55,8 +68,15 @@ async def run_tool(name: str, arguments: str) -> str:
     return json.dumps(result)
 
 
-async def stream_chat(messages: list[dict]):
-    conversation = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+async def stream_chat(session_id: str, user_message: str):
+    conversation = _sessions.get(session_id)
+    if conversation is None:
+        yield f"data: {json.dumps({'type': 'text', 'content': 'Session not found.'})}\\n\\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    conversation.append({"role": "user", "content": user_message})
+    assistant_text = ""
 
     while True:
         response = await client.chat.completions.create(
@@ -73,7 +93,6 @@ async def stream_chat(messages: list[dict]):
             conversation.append(message)
             for tc in message.tool_calls:
                 args = json.loads(tc.function.arguments)
-                # Stream tool call event to frontend
                 yield f"data: {json.dumps({'type': 'tool_call', 'tool': tc.function.name, 'args': args})}\n\n"
                 tool_result = await run_tool(tc.function.name, tc.function.arguments)
                 result_data = json.loads(tool_result)
@@ -117,8 +136,11 @@ async def stream_chat(messages: list[dict]):
         async for chunk in stream:
             delta = chunk.choices[0].delta.content
             if delta:
+                assistant_text += delta
                 yield f"data: {json.dumps({'type': 'text', 'content': delta})}\n\n"
 
+        # Save assistant reply to session
+        conversation.append({"role": "assistant", "content": assistant_text})
         yield "data: [DONE]\n\n"
         break
 
@@ -137,7 +159,7 @@ def _tool_url(name: str, args: dict) -> str:
         return url
     if name == "get_categories":        return f"{base}/categories"
     if name == "search_by_tag":         return f"{base}?limit=0 (filter tag: {args.get('tag')})"
-    if name == "search_by_field":        return f"{base}?limit=0 (filter {args.get('field')}: {args.get('value')})"
+    if name == "search_by_field":       return f"{base}?limit=0 (filter {args.get('field')}: {args.get('value')})"
     if name == "sort_products":         return f"{base}?limit=8&sortBy={args.get('sort_by')}&order={args.get('order')}"
     if name == "get_more_products":     return f"{base}/search?q={args.get('context')}&limit=8&skip={args.get('skip')}"
     return base
@@ -145,8 +167,7 @@ def _tool_url(name: str, args: dict) -> str:
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    messages = [m.model_dump() for m in req.messages]
-    return StreamingResponse(stream_chat(messages), media_type="text/event-stream")
+    return StreamingResponse(stream_chat(req.session_id, req.message), media_type="text/event-stream")
 
 
 # Serve React static build in production
