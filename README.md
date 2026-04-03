@@ -251,3 +251,32 @@ The current in-memory dict is cleared on server restart and is not safe for mult
 **ReactMarkdown only after streaming** — During streaming, text is rendered as a plain `<span>` to avoid expensive re-parsing on every token. ReactMarkdown is applied once when the stream is complete, eliminating flicker.
 
 **Results capped at 8** — Keeps the UI clean and avoids overwhelming the user. The `get_more_products` tool allows pagination on demand.
+
+---
+
+## Why not MCP?
+
+MCP (Model Context Protocol) is a standardized protocol for exposing tools to AI agents — think of it as a plugin system where tools live in a separate server process and any MCP-compatible agent can connect to them.
+
+### Architecture comparison
+
+| | This project | MCP-based project |
+|---|---|---|
+| Tools defined | Inside `tools.py` in the same app | In a separate MCP Server process |
+| Tool protocol | OpenAI function calling JSON schema | Standardized MCP protocol |
+| Orchestrator | Our `stream_chat()` agentic loop | A dedicated agent (LangChain, Claude, custom) |
+| Coupling | Tight — tools and agent in same codebase | Loose — MCP server is fully independent |
+| Reusability | Tools only work in this app | Any MCP-compatible agent can connect |
+| Multi-source | Add functions manually to `tools.py` | Spin up a new MCP server, orchestrator auto-discovers it |
+| Complexity | Minimal, single process | More moving parts, more setup |
+| Best for | Single app, one team | Platform/ecosystem, multiple agents or clients |
+
+### Why we chose our approach
+
+For a self-contained shopping copilot, MCP would be over-engineering. Our approach is simpler, faster to build, and easier to run locally with a single command.
+
+MCP adds real value when:
+- You want to **reuse tools across multiple agents or apps** — e.g. the same DummyJSON tools used by a voice assistant, a web app, and a mobile app simultaneously
+- You're building a **platform** where third parties can plug in their own tool servers
+- You have **multiple teams** owning different tool servers independently
+- You need **dynamic tool discovery** — the orchestrator connects to whatever MCP servers are available at runtime
