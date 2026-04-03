@@ -60,7 +60,7 @@ async def stream_chat(messages: list[dict]):
 
     while True:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5.4-mini",
             messages=conversation,
             tools=TOOL_DEFINITIONS,
             tool_choice="auto",
@@ -92,7 +92,7 @@ async def stream_chat(messages: list[dict]):
             continue
 
         stream = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5.4-mini",
             messages=conversation,
             stream=True,
         )

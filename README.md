@@ -76,7 +76,7 @@ Open http://localhost:8000 in your browser.
 ```
 1. User types a message
 2. Browser POSTs to /api/chat with conversation history
-3. FastAPI calls OpenAI (gpt-4o-mini) with tool definitions
+3. FastAPI calls OpenAI (gpt-5.4-mini) with tool definitions
 4. OpenAI decides which tool to call based on user intent
 5. Backend executes the tool (checks cache → calls DummyJSON if needed)
 6. Tool result is added to conversation and OpenAI is called again
