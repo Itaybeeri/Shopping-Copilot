@@ -258,19 +258,6 @@ The current in-memory dict is cleared on server restart and is not safe for mult
 
 MCP (Model Context Protocol) is a standardized protocol for exposing tools to AI agents — think of it as a plugin system where tools live in a separate server process and any MCP-compatible agent can connect to them.
 
-### Architecture comparison
-
-| | This project | MCP-based project |
-|---|---|---|
-| Tools defined | Inside `tools.py` in the same app | In a separate MCP Server process |
-| Tool protocol | OpenAI function calling JSON schema | Standardized MCP protocol |
-| Orchestrator | Our `stream_chat()` agentic loop | A dedicated agent (LangChain, Claude, custom) |
-| Coupling | Tight — tools and agent in same codebase | Loose — MCP server is fully independent |
-| Reusability | Tools only work in this app | Any MCP-compatible agent can connect |
-| Multi-source | Add functions manually to `tools.py` | Spin up a new MCP server, orchestrator auto-discovers it |
-| Complexity | Minimal, single process | More moving parts, more setup |
-| Best for | Single app, one team | Platform/ecosystem, multiple agents or clients |
-
 ### Why we chose our approach
 
 For a self-contained shopping copilot, MCP would be over-engineering. Our approach is simpler, faster to build, and easier to run locally with a single command.
