@@ -1,0 +1,69 @@
+AI Agent Commerce Assignment
+Goal
+Build a minimal AI shopping copilot that helps a user discover relevant products through a conversational interface.
+
+The system should understand user intent, retrieve relevant products from the provided API, and present those results clearly inside the chat.
+
+API
+Use the DummyJSON Products API as the product catalog.
+
+Base URL: https://dummyjson.com/products
+
+An OpenAPI specification file is provided: dummyjson_products_openapi.yaml (attached to this email).
+
+Use it to understand the available endpoints, filters, and query parameters. You do not need to use every endpoint. Choose the ones that make sense for your solution.
+
+What to Build
+Build a locally runnable application with the following:
+
+Conversational experience
+
+The user should be able to interact with the system through chat.
+
+Product discovery
+
+The system should identify what the user is looking for and retrieve relevant products from the API.
+
+In-chat product rendering
+
+Product results should be rendered as a UI widget inside the chat, not just as plain text. Each result should display useful product information such as title, short description, price, and image.
+
+Model Access
+You will receive an API key for OpenAI. Choose the model or models you want to use.
+
+Your API Key
+OpenAI
+These keys are provisioned specifically for this assignment and have usage limits. Please do not share them or commit them to your repository. Use environment variables (e.g. a .env file in your .gitignore).
+
+Allowed Models
+gpt-5.4-mini, gpt-5.4-nano
+
+Technical Freedom
+You may use any language, framework, or architecture you prefer.
+
+If useful, you may explore frameworks such as Mastra, LangChain, Vercel AI SDK, assistant-ui, CopilotKit, or LibreChat. You may also build everything from scratch.
+
+We are intentionally not prescribing the implementation approach. Use your judgment.
+
+Deliverables
+Submit:
+
+Source code for the application
+A README with:
+Setup and run instructions
+A short explanation of your technical choices
+Any assumptions, tradeoffs, or limitations
+Deadline
+Please submit your solution by Wednesday, 08 Apr 2026, 00:00. The API keys will be deactivated after this date.
+
+Notes
+The application only needs to run locally.
+The main objective is to build a coherent product discovery experience inside chat.
+We are interested in how you think about the problem and the choices you make, not only in the final UI.
+Submission
+To submit, reply to this email with a link to your Git repository.
+
+If anything is unclear, feel free to reply — we're happy to help.
+
+Good luck!
+The Bazak Team
