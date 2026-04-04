@@ -61,7 +61,7 @@ Open http://localhost:8000 in your browser.
 │   ┌──────────────────▼──────────────────────────────┐  │
 │   │              tools.py                           │  │
 │   │   In-memory cache (TTL: 5 min)                  │  │
-│   │   7 tool functions → DummyJSON API calls        │  │
+│   │   8 tool functions → DummyJSON API calls        │  │
 │   └──────────────────┬──────────────────────────────┘  │
 └─────────────────────-┼──────────────────────────────────┘
                        │ HTTPS
