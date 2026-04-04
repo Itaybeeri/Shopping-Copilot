@@ -135,6 +135,9 @@ The FastAPI application. Responsibilities:
 - Exposes `POST /api/chat` which accepts `session_id` + `message` and returns a `StreamingResponse` (SSE)
 - Maintains server-side conversation history in `_sessions` dict — the browser never sends history
 - Runs the **agentic loop**: calls OpenAI → executes tool calls → loops until no more tool calls → streams final response
+- Intercepts `sort_products` and `filter_in_memory` calls to operate on the last API results in memory — no extra DummyJSON call needed
+- Multiple `filter_in_memory` calls in the same turn are merged into one combined filter operation
+- Implements **conversation summary memory**: after every 10 exchanges, summarizes the conversation history and replaces it with a compact summary to keep the context window small
 - Streams 5 SSE event types: `tool_call`, `tool_result`, `products`, `categories`, `text`
 - The system prompt contains explicit tool selection rules to guide the model
 
@@ -142,20 +145,21 @@ The FastAPI application. Responsibilities:
 
 All product data fetching logic. Responsibilities:
 
-- Defines 7 tools exposed to the OpenAI model
+- Defines 8 tools exposed to the OpenAI model
 - Implements a **TTL-based in-memory cache** (5 minutes) — repeated queries skip DummyJSON entirely
-- All price filtering is done locally after fetching (DummyJSON has no price filter API)
+- All price, rating, and field filtering is done locally after fetching (DummyJSON has no filter API)
 
 #### Tool reference
 
 | Tool                       | DummyJSON endpoint                  | When triggered                              | Notes                                                                  |
 | -------------------------- | ----------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------- |
-| `search_products`          | `/products/search?q=`               | Generic keyword search                      | Supports `min_price` / `max_price` filtering                           |
-| `get_products_by_category` | `/products/category/{slug}`         | User mentions a category name               | Preferred over search when category is known. Supports price filtering |
+| `search_products`          | `/products/search?q=`               | Generic keyword search                      | Supports `min_price` / `max_price` / `min_rating` / `max_rating`       |
+| `get_products_by_category` | `/products/category/{slug}`         | User mentions a category name               | Preferred over search when category is known. Supports all filters     |
 | `get_categories`           | `/products/categories`              | User asks what's available                  | Returns list rendered as clickable chips                               |
 | `search_by_tag`            | `/products` (all, filtered locally) | User mentions a tag                         | Fetches all 194 products, filters by tag match                         |
 | `search_by_field`          | `/products` (all, filtered locally) | User mentions brand, SKU, availability etc. | Filters any product field by value                                     |
-| `sort_products`            | `/products?sortBy=&order=`          | User asks for cheapest / highest rated      | Uses DummyJSON native sort params                                      |
+| `filter_in_memory`         | No API call                         | User refines current results                | Filters last API results by rating/price without a new fetch           |
+| `sort_products`            | No API call                         | User asks to sort current results           | Sorts last API results in memory by price or rating                    |
 | `get_more_products`        | `/products/search?skip=`            | User asks for more results                  | Paginates previous search with skip offset                             |
 
 #### Cache behavior
@@ -189,6 +193,7 @@ Renders a single chat message. Handles:
 
 - User messages: plain text bubble (right-aligned)
 - Assistant messages: category chips + product grid + markdown text (left-aligned)
+- Product grid shows a **Show more** button on the last message to trigger pagination
 - RTL detection: if the text contains Hebrew characters (`\u0590-\u05FF`), sets `dir="rtl"` on the bubble
 - During streaming: renders plain `<span>` to avoid ReactMarkdown re-parsing on every token. Switches to full markdown rendering only when streaming is complete
 
@@ -244,7 +249,11 @@ The current in-memory dict is cleared on server restart and is not safe for mult
 
 **SSE streaming** — Server-Sent Events allow the backend to stream tool call events, product data, and text incrementally. The frontend renders product cards before the text response is complete.
 
-**Client-side price filtering** — DummyJSON has no price filter API. The backend fetches up to 100 results and filters locally. This is fast enough for a 194-product catalog.
+**In-memory sort and filter** — `sort_products` and `filter_in_memory` never call DummyJSON. They operate on the last API result already stored in the session conversation. This means follow-up requests like "sort by rating" or "show only those above 4 stars" are instant and free. Multiple filter conditions in the same message are merged into one pass. Importantly, each filter/sort always operates on the **original API result**, not on a previously filtered list — so switching from "above 4" to "below 4" always works correctly.
+
+**Conversation summary memory** — After every 10 user+assistant exchanges, the backend calls OpenAI once to summarize the conversation into 3-5 sentences, then replaces the full history with that summary + the last 2 clean exchanges. This keeps the context window small regardless of conversation length and reduces token cost per request. The summarization only keeps clean `user`/`assistant` messages in the tail — never assistant messages with pending tool calls — to avoid OpenAI rejecting requests with unmatched `tool_call_id` errors.
+
+**Client-side price and rating filtering** — DummyJSON has no filter API. The backend fetches up to 100 results and filters locally by `min_price`, `max_price`, `min_rating`, and `max_rating`. This is fast enough for a 194-product catalog.
 
 **Local tag/field filtering** — Same approach: fetch all products, filter in Python. Acceptable for this dataset size.
 
