@@ -25,7 +25,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Server-side session store: session_id -> conversation history
 _sessions: dict[str, list[dict]] = {}
 
 SYSTEM_PROMPT = """You are a friendly and enthusiastic shopping copilot. Help users discover products they'll love.
@@ -39,10 +38,12 @@ Tool selection rules:
 - If the user mentions a price constraint (under $X, over $X, less than $X) — pass it as max_price or min_price, never include price in the query string
 - If the user mentions a rating constraint (above X, more than X stars) — pass it as min_rating; (below X, less than X stars) — pass it as max_rating
 - If the user mentions a specific tag — use search_by_tag
-- If the user wants to sort or filter the CURRENT results (by rating, price etc.) — use sort_products or filter_in_memory respectively, never fetch new data
+- If the user wants to sort or filter the CURRENT results (by rating, price etc.) — ALWAYS use filter_in_memory or sort_products, NEVER call search_products or get_products_by_category again. This applies when the user says things like 'only show', 'filter', 'מתחת ל', 'מעל', 'פחות מ', 'יותר מ' after already seeing results.
 - If the user asks for more results — use get_more_products
 - For all other keyword searches — use search_products
 Never make up product data — always use tool results."""
+
+SUMMARY_THRESHOLD = 10
 
 
 class ChatRequest(BaseModel):
@@ -77,7 +78,6 @@ def _get_last_products(conversation: list) -> list:
             try:
                 content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
                 data = json.loads(content)
-                # Skip in-memory filter/sort results — they have an 'in_memory' marker
                 if isinstance(data, dict) and data.get("in_memory"):
                     continue
                 if isinstance(data, dict) and "products" in data:
@@ -89,6 +89,51 @@ def _get_last_products(conversation: list) -> list:
 
 def sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
+
+
+async def _maybe_summarize(conversation: list[dict]) -> None:
+    """Summarize old messages once conversation exceeds threshold, keeping full tool sequences intact."""
+    exchanges = [m for m in conversation if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    if len(exchanges) < SUMMARY_THRESHOLD:
+        return
+
+    system_msg = conversation[0]
+
+    transcript = "\n".join(
+        f"{m['role'].upper()}: {m['content']}"
+        for m in conversation[1:]
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant") and m.get("content")
+    )
+
+    summary_response = await client.chat.completions.create(
+        model="gpt-5.4-mini",
+        messages=[
+            {"role": "system", "content": "Summarize the following shopping conversation concisely in 3-5 sentences. Focus on what the user was looking for, filters applied, and what was shown."},
+            {"role": "user", "content": transcript},
+        ],
+        stream=False,
+    )
+    summary = summary_response.choices[0].message.content
+
+    # Find the last complete user→assistant exchange (no dangling tool calls)
+    # Walk backwards to find a clean assistant message (no tool_calls) and its preceding user message
+    safe_tail = []
+    i = len(conversation) - 1
+    while i >= 1 and len(safe_tail) < 4:
+        msg = conversation[i]
+        if not isinstance(msg, dict):
+            i -= 1
+            continue
+        role = msg.get("role")
+        # Only include clean user/assistant messages — skip tool messages and assistant messages with tool_calls
+        if role in ("user", "assistant") and not msg.get("tool_calls"):
+            safe_tail.insert(0, msg)
+        i -= 1
+
+    conversation.clear()
+    conversation.append(system_msg)
+    conversation.append({"role": "system", "content": f"[Conversation summary so far]: {summary}"})
+    conversation.extend(safe_tail)
 
 
 async def stream_chat(session_id: str, user_message: str):
@@ -114,11 +159,40 @@ async def stream_chat(session_id: str, user_message: str):
 
         if message.tool_calls:
             conversation.append(message.model_dump())
+
+            # Collect all filter_in_memory calls and merge into one operation
+            filter_args_merged: dict = {}
+            regular_calls = []
             for tc in message.tool_calls:
+                args = json.loads(tc.function.arguments)
+                if tc.function.name == "filter_in_memory":
+                    filter_args_merged.update({k: v for k, v in args.items() if v is not None})
+                else:
+                    regular_calls.append(tc)
+
+            if filter_args_merged:
+                yield sse({"type": "tool_call", "tool": "filter_in_memory", "args": filter_args_merged})
+                last_products = _get_last_products(conversation)
+                filtered = list(last_products)
+                if filter_args_merged.get("min_rating") is not None:
+                    filtered = [p for p in filtered if p.get("rating", 0) >= filter_args_merged["min_rating"]]
+                if filter_args_merged.get("max_rating") is not None:
+                    filtered = [p for p in filtered if p.get("rating", 0) <= filter_args_merged["max_rating"]]
+                if filter_args_merged.get("max_price") is not None:
+                    filtered = [p for p in filtered if p["price"] <= filter_args_merged["max_price"]]
+                if filter_args_merged.get("min_price") is not None:
+                    filtered = [p for p in filtered if p["price"] >= filter_args_merged["min_price"]]
+                result_data = {"products": filtered, "total": len(filtered), "in_memory": True}
+                tool_result = json.dumps(result_data)
+                yield sse({"type": "tool_result", "tool": "filter_in_memory", "count": len(filtered), "url": f"(filtered in memory: {filter_args_merged})", "payload": result_data})
+                for tc in message.tool_calls:
+                    if tc.function.name == "filter_in_memory":
+                        conversation.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
+
+            for tc in regular_calls:
                 args = json.loads(tc.function.arguments)
                 yield sse({"type": "tool_call", "tool": tc.function.name, "args": args})
 
-                # sort_products: sort last results in memory
                 if tc.function.name == "sort_products":
                     last_products = _get_last_products(conversation)
                     if last_products:
@@ -131,33 +205,9 @@ async def stream_chat(session_id: str, user_message: str):
                         conversation.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
                         continue
 
-                # filter_in_memory: filter last results in memory
-                if tc.function.name == "filter_in_memory":
-                    last_products = _get_last_products(conversation)
-                    if last_products:
-                        filtered = last_products
-                        if args.get("min_rating") is not None:
-                            filtered = [p for p in filtered if p.get("rating", 0) >= args["min_rating"]]
-                        if args.get("max_rating") is not None:
-                            filtered = [p for p in filtered if p.get("rating", 0) <= args["max_rating"]]
-                        if args.get("max_price") is not None:
-                            filtered = [p for p in filtered if p["price"] <= args["max_price"]]
-                        if args.get("min_price") is not None:
-                            filtered = [p for p in filtered if p["price"] >= args["min_price"]]
-                        result_data = {"products": filtered, "total": len(filtered), "in_memory": True}
-                        tool_result = json.dumps(result_data)
-                        yield sse({"type": "tool_result", "tool": tc.function.name, "count": len(filtered), "url": "(filtered in memory)", "payload": result_data})
-                        conversation.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
-                        continue
-
                 tool_result = await run_tool(tc.function.name, tc.function.arguments)
                 result_data = json.loads(tool_result)
-                if isinstance(result_data, list):
-                    count = len(result_data)
-                elif isinstance(result_data, dict):
-                    count = len(result_data.get("products", []))
-                else:
-                    count = 0
+                count = len(result_data) if isinstance(result_data, list) else len(result_data.get("products", []))
                 yield sse({"type": "tool_result", "tool": tc.function.name, "count": count, "url": _tool_url(tc.function.name, args), "payload": result_data})
                 conversation.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
             continue
@@ -171,7 +221,7 @@ async def stream_chat(session_id: str, user_message: str):
         products = []
         categories = []
         for msg in reversed(conversation):
-            if msg.get("role") == "tool":
+            if isinstance(msg, dict) and msg.get("role") == "tool":
                 data = json.loads(msg["content"])
                 if isinstance(data, list):
                     categories = data
@@ -181,7 +231,6 @@ async def stream_chat(session_id: str, user_message: str):
 
         if categories:
             yield sse({"type": "categories", "categories": categories})
-
         if products:
             yield sse({"type": "products", "products": products})
 
@@ -192,6 +241,7 @@ async def stream_chat(session_id: str, user_message: str):
                 yield sse({"type": "text", "content": delta})
 
         conversation.append({"role": "assistant", "content": assistant_text})
+        await _maybe_summarize(conversation)
         yield "data: [DONE]\n\n"
         break
 
@@ -221,7 +271,6 @@ async def chat(req: ChatRequest):
     return StreamingResponse(stream_chat(req.session_id, req.message), media_type="text/event-stream")
 
 
-# Serve React static build in production
 static_dir = Path(__file__).parent.parent / "frontend" / "dist"
 if static_dir.exists():
     app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
