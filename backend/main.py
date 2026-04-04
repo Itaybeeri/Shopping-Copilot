@@ -37,8 +37,9 @@ Format your responses using markdown. If the user writes in Hebrew, respond enti
 Tool selection rules:
 - If the user mentions a known category (smartphones, beauty, laptops, groceries, furniture, etc.) — ALWAYS use get_products_by_category, never search_products
 - If the user mentions a price constraint (under $X, over $X, less than $X) — pass it as max_price or min_price, never include price in the query string
+- If the user mentions a rating constraint (above X, more than X stars) — pass it as min_rating; (below X, less than X stars) — pass it as max_rating
 - If the user mentions a specific tag — use search_by_tag
-- If the user wants sorted results (cheapest, highest rated) — use sort_products
+- If the user wants to sort or filter the CURRENT results (by rating, price etc.) — use sort_products or filter_in_memory respectively, never fetch new data
 - If the user asks for more results — use get_more_products
 - For all other keyword searches — use search_products
 Never make up product data — always use tool results."""
@@ -68,10 +69,32 @@ async def run_tool(name: str, arguments: str) -> str:
     return json.dumps(result)
 
 
+def _get_last_products(conversation: list) -> list:
+    """Extract the most recent ORIGINAL API product list, skipping in-memory operations."""
+    for msg in reversed(conversation):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role == "tool":
+            try:
+                content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+                data = json.loads(content)
+                # Skip in-memory filter/sort results — they have an 'in_memory' marker
+                if isinstance(data, dict) and data.get("in_memory"):
+                    continue
+                if isinstance(data, dict) and "products" in data:
+                    return data["products"]
+            except Exception:
+                pass
+    return []
+
+
+def sse(data: dict) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+
+
 async def stream_chat(session_id: str, user_message: str):
     conversation = _sessions.get(session_id)
     if conversation is None:
-        yield f"data: {json.dumps({'type': 'text', 'content': 'Session not found.'})}\\n\\n"
+        yield sse({"type": "text", "content": "Session not found."})
         yield "data: [DONE]\n\n"
         return
 
@@ -90,24 +113,53 @@ async def stream_chat(session_id: str, user_message: str):
         message = response.choices[0].message
 
         if message.tool_calls:
-            conversation.append(message)
+            conversation.append(message.model_dump())
             for tc in message.tool_calls:
                 args = json.loads(tc.function.arguments)
-                yield f"data: {json.dumps({'type': 'tool_call', 'tool': tc.function.name, 'args': args})}\n\n"
+                yield sse({"type": "tool_call", "tool": tc.function.name, "args": args})
+
+                # sort_products: sort last results in memory
+                if tc.function.name == "sort_products":
+                    last_products = _get_last_products(conversation)
+                    if last_products:
+                        reverse = args.get("order", "asc") == "desc"
+                        sort_key = args.get("sort_by", "price")
+                        sorted_products = sorted(last_products, key=lambda p: p.get(sort_key, 0), reverse=reverse)
+                        result_data = {"products": sorted_products, "total": len(sorted_products), "in_memory": True}
+                        tool_result = json.dumps(result_data)
+                        yield sse({"type": "tool_result", "tool": tc.function.name, "count": len(sorted_products), "url": f"(sorted in memory by {sort_key} {args.get('order', 'asc')})", "payload": result_data})
+                        conversation.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
+                        continue
+
+                # filter_in_memory: filter last results in memory
+                if tc.function.name == "filter_in_memory":
+                    last_products = _get_last_products(conversation)
+                    if last_products:
+                        filtered = last_products
+                        if args.get("min_rating") is not None:
+                            filtered = [p for p in filtered if p.get("rating", 0) >= args["min_rating"]]
+                        if args.get("max_rating") is not None:
+                            filtered = [p for p in filtered if p.get("rating", 0) <= args["max_rating"]]
+                        if args.get("max_price") is not None:
+                            filtered = [p for p in filtered if p["price"] <= args["max_price"]]
+                        if args.get("min_price") is not None:
+                            filtered = [p for p in filtered if p["price"] >= args["min_price"]]
+                        result_data = {"products": filtered, "total": len(filtered), "in_memory": True}
+                        tool_result = json.dumps(result_data)
+                        yield sse({"type": "tool_result", "tool": tc.function.name, "count": len(filtered), "url": "(filtered in memory)", "payload": result_data})
+                        conversation.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
+                        continue
+
                 tool_result = await run_tool(tc.function.name, tc.function.arguments)
                 result_data = json.loads(tool_result)
                 if isinstance(result_data, list):
                     count = len(result_data)
                 elif isinstance(result_data, dict):
-                    count = len(result_data.get('products', []))
+                    count = len(result_data.get("products", []))
                 else:
                     count = 0
-                yield f"data: {json.dumps({'type': 'tool_result', 'tool': tc.function.name, 'count': count, 'url': _tool_url(tc.function.name, args), 'payload': result_data})}\n\n"
-                conversation.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": tool_result,
-                })
+                yield sse({"type": "tool_result", "tool": tc.function.name, "count": count, "url": _tool_url(tc.function.name, args), "payload": result_data})
+                conversation.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
             continue
 
         stream = await client.chat.completions.create(
@@ -128,18 +180,17 @@ async def stream_chat(session_id: str, user_message: str):
                 break
 
         if categories:
-            yield f"data: {json.dumps({'type': 'categories', 'categories': categories})}\n\n"
+            yield sse({"type": "categories", "categories": categories})
 
         if products:
-            yield f"data: {json.dumps({'type': 'products', 'products': products})}\n\n"
+            yield sse({"type": "products", "products": products})
 
         async for chunk in stream:
             delta = chunk.choices[0].delta.content
             if delta:
                 assistant_text += delta
-                yield f"data: {json.dumps({'type': 'text', 'content': delta})}\n\n"
+                yield sse({"type": "text", "content": delta})
 
-        # Save assistant reply to session
         conversation.append({"role": "assistant", "content": assistant_text})
         yield "data: [DONE]\n\n"
         break
@@ -149,19 +200,19 @@ def _tool_url(name: str, args: dict) -> str:
     base = "https://dummyjson.com/products"
     if name == "search_products":
         url = f"{base}/search?q={args.get('query')}&limit=100"
-        if args.get('max_price'): url += f" (max ${args.get('max_price')})"
-        if args.get('min_price'): url += f" (min ${args.get('min_price')})"
+        if args.get("max_price"): url += f" (max ${args.get('max_price')})"
+        if args.get("min_price"): url += f" (min ${args.get('min_price')})"
         return url
     if name == "get_products_by_category":
         url = f"{base}/category/{args.get('slug')}?limit=100"
-        if args.get('max_price'): url += f" (max ${args.get('max_price')})"
-        if args.get('min_price'): url += f" (min ${args.get('min_price')})"
+        if args.get("max_price"): url += f" (max ${args.get('max_price')})"
+        if args.get("min_price"): url += f" (min ${args.get('min_price')})"
         return url
-    if name == "get_categories":        return f"{base}/categories"
-    if name == "search_by_tag":         return f"{base}?limit=0 (filter tag: {args.get('tag')})"
-    if name == "search_by_field":       return f"{base}?limit=0 (filter {args.get('field')}: {args.get('value')})"
-    if name == "sort_products":         return f"{base}?limit=8&sortBy={args.get('sort_by')}&order={args.get('order')}"
-    if name == "get_more_products":     return f"{base}/search?q={args.get('context')}&limit=8&skip={args.get('skip')}"
+    if name == "get_categories":    return f"{base}/categories"
+    if name == "search_by_tag":     return f"{base}?limit=0 (filter tag: {args.get('tag')})"
+    if name == "search_by_field":   return f"{base}?limit=0 (filter {args.get('field')}: {args.get('value')})"
+    if name == "sort_products":     return f"(sorted in memory by {args.get('sort_by')} {args.get('order')})"
+    if name == "get_more_products": return f"{base}/search?q={args.get('context')}&limit=8&skip={args.get('skip')}"
     return base
 
 

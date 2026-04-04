@@ -229,7 +229,17 @@ function ChatApp() {
               </div>
             </div>
           ) : (
-            messages.map((m, i) => <Message key={i} message={m} />)
+            messages.map((m, i) => {
+              const isLastWithProducts = m.role === 'assistant' && m.products && m.products.length > 0 &&
+                i === messages.map((msg, idx) => msg.role === 'assistant' && msg.products?.length ? idx : -1).filter(x => x >= 0).at(-1)
+              return (
+                <Message
+                  key={i}
+                  message={m}
+                  onShowMore={isLastWithProducts ? () => sendMessage('Show me more results') : undefined}
+                />
+              )
+            })
           )}
 
           {loading && messages[messages.length - 1]?.content === '' && (

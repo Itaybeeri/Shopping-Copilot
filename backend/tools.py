@@ -19,8 +19,8 @@ def _set(key: str, value):
     _cache[key] = (value, time.time())
 
 
-async def search_products(query: str, max_price: float | None = None, min_price: float | None = None) -> dict:
-    key = f"search:{query.lower()}:{min_price}:{max_price}"
+async def search_products(query: str, max_price: float | None = None, min_price: float | None = None, min_rating: float | None = None, max_rating: float | None = None) -> dict:
+    key = f"search:{query.lower()}:{min_price}:{max_price}:{min_rating}:{max_rating}"
     if cached := _get(key):
         return cached
     async with httpx.AsyncClient() as client:
@@ -32,13 +32,17 @@ async def search_products(query: str, max_price: float | None = None, min_price:
         products = [p for p in products if p["price"] <= max_price]
     if min_price is not None:
         products = [p for p in products if p["price"] >= min_price]
+    if min_rating is not None:
+        products = [p for p in products if p.get("rating", 0) >= min_rating]
+    if max_rating is not None:
+        products = [p for p in products if p.get("rating", 0) <= max_rating]
     result = {"products": products[:LIMIT], "total": len(products)}
     _set(key, result)
     return result
 
 
-async def get_products_by_category(slug: str, max_price: float | None = None, min_price: float | None = None) -> dict:
-    key = f"category:{slug.lower()}:{min_price}:{max_price}"
+async def get_products_by_category(slug: str, max_price: float | None = None, min_price: float | None = None, min_rating: float | None = None, max_rating: float | None = None) -> dict:
+    key = f"category:{slug.lower()}:{min_price}:{max_price}:{min_rating}:{max_rating}"
     if cached := _get(key):
         return cached
     async with httpx.AsyncClient() as client:
@@ -50,6 +54,10 @@ async def get_products_by_category(slug: str, max_price: float | None = None, mi
         products = [p for p in products if p["price"] <= max_price]
     if min_price is not None:
         products = [p for p in products if p["price"] >= min_price]
+    if min_rating is not None:
+        products = [p for p in products if p.get("rating", 0) >= min_rating]
+    if max_rating is not None:
+        products = [p for p in products if p.get("rating", 0) <= max_rating]
     result = {"products": products[:LIMIT], "total": len(products)}
     _set(key, result)
     return result
@@ -97,6 +105,11 @@ async def search_by_field(field: str, value: str) -> dict:
     return result
 
 
+async def filter_in_memory(min_rating: float | None = None, max_rating: float | None = None, max_price: float | None = None, min_price: float | None = None) -> dict:
+    """Marker function — actual filtering happens in stream_chat using last products in session."""
+    return {"filter": {"min_rating": min_rating, "max_rating": max_rating, "max_price": max_price, "min_price": min_price}}
+
+
 async def sort_products(sort_by: str, order: str = "asc", skip: int = 0) -> dict:
     key = f"sort:{sort_by}:{order}:{skip}"
     if cached := _get(key):
@@ -126,13 +139,15 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_products",
-            "description": "Search for products by keyword with optional price filtering. Use when the user mentions product names, brands, or descriptive terms. Extract price constraints separately into min_price/max_price — do NOT include price in the query string.",
+            "description": "Search for products by keyword with optional filters. Use when the user mentions product names or descriptive terms. Extract price/rating constraints separately — do NOT include them in the query string.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search keyword only, no price (e.g. 'smartphones', 'laptop', 'face cream')"},
-                    "max_price": {"type": "number", "description": "Maximum price filter e.g. 500 for 'under $500'"},
-                    "min_price": {"type": "number", "description": "Minimum price filter e.g. 100 for 'over $100'"},
+                    "query": {"type": "string", "description": "Search keyword only (e.g. 'smartphones', 'laptop')"},
+                    "max_price": {"type": "number", "description": "Maximum price filter"},
+                    "min_price": {"type": "number", "description": "Minimum price filter"},
+                    "min_rating": {"type": "number", "description": "Minimum rating filter e.g. 4"},
+                    "max_rating": {"type": "number", "description": "Maximum rating filter e.g. 3 for 'below 3'"},
                 },
                 "required": ["query"],
             },
@@ -142,13 +157,15 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_products_by_category",
-            "description": "Get products from a specific category with optional price filtering. PREFER this over search_products when the user mentions a known category name like smartphones, beauty, laptops, groceries, furniture etc. Extract price constraints into min_price/max_price.",
+            "description": "Get products from a specific category. PREFER this over search_products when the user mentions a known category. Supports price and rating filters.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "slug": {"type": "string", "description": "Category slug e.g. smartphones, beauty, laptops, groceries, furniture"},
-                    "max_price": {"type": "number", "description": "Maximum price filter e.g. 500 for 'under $500'"},
-                    "min_price": {"type": "number", "description": "Minimum price filter e.g. 100 for 'over $100'"},
+                    "slug": {"type": "string", "description": "Category slug e.g. smartphones, beauty, laptops"},
+                    "max_price": {"type": "number", "description": "Maximum price filter"},
+                    "min_price": {"type": "number", "description": "Minimum price filter"},
+                    "min_rating": {"type": "number", "description": "Minimum rating filter e.g. 4"},
+                    "max_rating": {"type": "number", "description": "Maximum rating filter e.g. 3 for 'below 3'"},
                 },
                 "required": ["slug"],
             },
@@ -158,7 +175,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_categories",
-            "description": "Get all available product categories. Use when the user asks what categories or types of products are available.",
+            "description": "Get all available product categories.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -166,11 +183,11 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_by_tag",
-            "description": "Find products by a specific tag. Use when the user asks for products with a specific tag.",
+            "description": "Find products by a specific tag.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tag": {"type": "string", "description": "The tag to filter products by e.g. 'face powder', 'beauty'"}
+                    "tag": {"type": "string", "description": "Tag to filter by e.g. 'face powder'"}
                 },
                 "required": ["tag"],
             },
@@ -180,12 +197,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_by_field",
-            "description": "Search products by any specific field value such as brand, sku, availabilityStatus, shippingInformation, warrantyInformation. Use when the user asks for a specific brand or other product attribute.",
+            "description": "Search products by a specific field value such as brand, sku, availabilityStatus.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "field": {"type": "string", "description": "Product field to search in e.g. 'brand', 'sku', 'availabilityStatus'"},
-                    "value": {"type": "string", "description": "Value to search for e.g. 'IWC', 'In Stock', 'Ships overnight'"},
+                    "field": {"type": "string", "description": "Field name e.g. 'brand', 'availabilityStatus'"},
+                    "value": {"type": "string", "description": "Value to search for e.g. 'IWC'"},
                 },
                 "required": ["field", "value"],
             },
@@ -194,14 +211,29 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "filter_in_memory",
+            "description": "Filter the results ALREADY shown to the user. Use when the user wants to narrow down current results by rating or price — do NOT fetch new data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_rating": {"type": "number", "description": "Keep only products with rating >= this value"},
+                    "max_rating": {"type": "number", "description": "Keep only products with rating <= this value e.g. 4 for 'below 4'"},
+                    "max_price": {"type": "number", "description": "Keep only products with price <= this value"},
+                    "min_price": {"type": "number", "description": "Keep only products with price >= this value"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "sort_products",
-            "description": "Get products sorted by a field. Use when user asks for cheapest, most expensive, highest rated, or wants products sorted by price or rating.",
+            "description": "Sort the results ALREADY shown to the user by price or rating. Use when user asks to sort current results.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sort_by": {"type": "string", "description": "Field to sort by: 'price' or 'rating'"},
-                    "order": {"type": "string", "description": "'asc' for cheapest/lowest first, 'desc' for most expensive/highest first"},
-                    "skip": {"type": "integer", "description": "Number of products to skip for pagination, default 0"},
+                    "order": {"type": "string", "description": "'asc' for lowest first, 'desc' for highest first"},
                 },
                 "required": ["sort_by", "order"],
             },
@@ -211,12 +243,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_more_products",
-            "description": "Get more results for a previous search query. Use when the user asks to see more products or next page.",
+            "description": "Get more results for a previous search query. Use when the user asks to see more products.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "context": {"type": "string", "description": "The original search query to paginate"},
-                    "skip": {"type": "integer", "description": "Number of products to skip (e.g. 8 for second page, 16 for third)"},
+                    "context": {"type": "string", "description": "The original search query"},
+                    "skip": {"type": "integer", "description": "Number of products to skip (8 for page 2, 16 for page 3)"},
                 },
                 "required": ["context", "skip"],
             },
@@ -230,6 +262,7 @@ TOOL_MAP = {
     "get_categories": get_categories,
     "search_by_tag": search_by_tag,
     "search_by_field": search_by_field,
+    "filter_in_memory": filter_in_memory,
     "sort_products": sort_products,
     "get_more_products": get_more_products,
 }

@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { Bot, User } from 'lucide-react'
+import { Bot, User, ChevronDown } from 'lucide-react'
 import ProductCard from './ProductCard'
 import CategoryChips from './CategoryChips'
 import type { ChatMessage } from '../types'
@@ -9,7 +9,7 @@ function detectDir(text: string): 'rtl' | 'ltr' {
   return /[\u0590-\u05FF]/.test(text) ? 'rtl' : 'ltr'
 }
 
-function Message({ message }: { message: ChatMessage }) {
+function Message({ message, onShowMore }: { message: ChatMessage; onShowMore?: () => void }) {
   const isUser = message.role === 'user'
   const dir = message.content ? detectDir(message.content) : 'ltr'
 
@@ -29,10 +29,21 @@ function Message({ message }: { message: ChatMessage }) {
 
         {/* Product grid - shown ABOVE text */}
         {message.products && message.products.length > 0 && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 w-full max-w-4xl">
-            {message.products.map((p, i) => (
-              <ProductCard key={p.id} product={p} index={i} />
-            ))}
+          <div className="flex flex-col gap-3 w-full max-w-4xl">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+              {message.products.map((p, i) => (
+                <ProductCard key={p.id} product={p} index={i} />
+              ))}
+            </div>
+            {onShowMore && (
+              <button
+                onClick={onShowMore}
+                className="flex items-center gap-2 self-center px-4 py-2 rounded-full bg-[#1e1e2a] border border-white/10 text-sm text-white/60 hover:border-indigo-500/50 hover:text-indigo-400 transition-all duration-200"
+              >
+                <ChevronDown size={14} />
+                Show more results
+              </button>
+            )}
           </div>
         )}
 
